@@ -1,0 +1,155 @@
+# Comparison tool with smililar and common header names for Excel/CSV/Text files
+# Sripathi R Busireddy
+# Version 1.0
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+from datetime import datetime
+from io import BytesIO
+
+# Function to trim .0 from all string fields in a DataFrame
+def trim_decimal_points(df):
+    return df.applymap(lambda x: x[:-2] if isinstance(x, str) and x.endswith('.0') else x)
+
+# Function to clean the data
+def clean_data(df):
+    df = df.applymap(lambda x: x.strip() if isinstance(x, str) else x)
+    df = df.astype(str)
+    df = df.replace('nan', np.nan)
+    df = df.fillna('')
+    df = trim_decimal_points(df)
+    return df
+
+# Function to compare two dataframes
+def compare_dataframes(file_1_data, file_2_data, merge_keys):
+    merged_df = pd.merge(file_1_data, file_2_data, on=merge_keys, how='outer', suffixes=('_file1', '_file2'))
+
+    for column in file_1_data.columns:
+        if column in merge_keys:  # Skip columns used for merging
+            continue
+        file1_col_name = f'{column}_file1'
+        file2_col_name = f'{column}_file2'
+        
+        if file1_col_name not in merged_df.columns or file2_col_name not in merged_df.columns:
+            st.warning(f"Column '{column}' not found in both dataframes. Skipping comparison for this column.")
+            continue
+        
+        file1_col = merged_df[file1_col_name]
+        file2_col = merged_df[file2_col_name]
+        
+        both_values_none_or_blank = ((file1_col.isnull() | (file1_col == '')) & 
+                                     (file2_col.isnull() | (file2_col == '')))
+        
+        # Check for discrepancies
+        discrepancy = (file1_col != file2_col)
+        
+        # If both values are NaN or blank, set discrepancy to 'No'
+        discrepancy = discrepancy & ~both_values_none_or_blank
+
+        discrepancy = discrepancy.map({True: 'Yes', False: 'No'}, na_action='ignore')
+        discrepancy[both_values_none_or_blank] = 'No'
+        
+        merged_df[f'Discrepancy_{column}'] = discrepancy
+
+    result_columns = [col for col in merge_keys]
+    for column in file_1_data.columns:
+        if column in merge_keys:
+            continue
+        file1_col_name = f'{column}_file1'
+        file2_col_name = f'{column}_file2'
+        discrepancy_col_name = f'Discrepancy_{column}'
+        if file1_col_name in merged_df.columns and file2_col_name in merged_df.columns and discrepancy_col_name in merged_df.columns:
+            result_columns.extend([file1_col_name, file2_col_name, discrepancy_col_name])
+    result_df = merged_df[result_columns]
+
+    return result_df
+
+# Function to load data from file
+def load_data(file):
+    try:
+        if file.name.endswith('.xlsx'):
+            return pd.read_excel(file)
+        elif file.name.endswith('.csv'):
+            return pd.read_csv(file)
+        elif file.name.endswith('.txt'):
+            return pd.read_csv(file, delimiter="\t")
+        else:
+            st.error("Unsupported file format.")
+            return None
+    except pd.errors.EmptyDataError:
+        st.error("No columns to parse from file. Please upload a valid file.")
+        return None
+    except Exception as e:
+        st.error(f"An error occurred while reading the file: {e}")
+        return None
+
+# Define the Streamlit app
+st.title("Excel/CSV/Text File Comparison Tool")
+
+st.write("Upload two Excel, CSV, or text files to compare.")
+
+# File upload widgets
+file_1 = st.file_uploader("Upload File1", type=["xlsx", "csv", "txt"])
+file_2 = st.file_uploader("Upload File2", type=["xlsx", "csv", "txt"])
+
+if tibco_file and snap_file:
+    # Load the data from the uploaded files
+    file_1_data = load_data(file_1)
+    file_2_data = load_data(file_2)
+    
+    if file_1_data is not None and file_2_data is not None:
+        # Clean the data
+        file_1_data = clean_data(file_1_data)
+        file_2_data = clean_data(file_2_data)
+
+        st.write("Sample File1 Data:")
+        st.write(file_1_data.head())  # Show a preview of the loaded data
+        st.write("Sample File2 Data:")
+        st.write(file_2_data.head())  # Show a preview of the loaded data
+
+        # Get merge keys from user
+        merge_keys_input = st.text_input(
+            "Enter merge keys separated by commas (e.g., [Common names in both files]'account_number,person_code'):"
+        )
+        
+        if merge_keys_input:
+            merge_keys = [key.strip() for key in merge_keys_input.split(",")]
+            
+            # Compare the dataframes
+            result_df = compare_dataframes(file_1_data, file_2_data, merge_keys)
+            
+            # Display the results
+            st.write("Comparison Results:")
+            st.dataframe(result_df)
+            
+            # Highlight discrepancies
+            def highlight_discrepancy(val):
+                if val == 'Yes':
+                    return 'background-color: red'
+                elif val == 'Ignore':
+                    return 'background-color: yellow'
+                else:
+                    return 'background-color: lightgreen'
+            
+            discrepancy_rows = result_df[result_df.filter(like='Discrepancy_').eq('Yes').any(axis=1)]
+            ignore_count = result_df.filter(like='Discrepancy_member_tag_2_name').eq('Ignore').sum().sum()
+            styled_result_discrepancy_df = discrepancy_rows.style.applymap(
+                highlight_discrepancy, 
+                subset=[f'Discrepancy_{column}' for column in file_1_data.columns if column not in merge_keys]
+            )
+            
+            # Save the styled DataFrame to an Excel file in memory
+            current_datetime = datetime.now().strftime("%Y%m%d_%H%M%S")
+            xlsx_filename = f"discrepancy_results_{current_datetime}_Ignore_{ignore_count}.xlsx"
+            output = BytesIO()
+            styled_result_discrepancy_df.to_excel(output, engine='openpyxl', index=False, encoding='utf-8')
+            output.seek(0)
+
+            # Provide a download link for the Excel file
+            st.download_button(
+                label="Download Discrepancy Report",
+                data=output,
+                file_name=xlsx_filename,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
